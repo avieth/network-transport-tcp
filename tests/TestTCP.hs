@@ -178,8 +178,15 @@ testEarlyDisconnect = do
       -- Listen for incoming messages
       (clientPort, _) <- forkServer "127.0.0.1" "0" 5 True throwIO throwIO $ \socketFree (sock, _) -> do
         -- Initial setup
-        0 <- recvWord32 sock
-        0 <- recvWord32 sock
+        -- Protocol version
+        _ <- recvWord32 sock
+        -- Length of handshake
+        _ <- recvWord32 sock
+        -- The EndPointId they want.
+        _ <- recvWord32 sock
+        -- 0 for addressable
+        _ <- recvWord32 sock
+        -- The peer's address.
         _ <- recvWithLength maxBound sock
         sendMany sock [encodeWord32 (encodeConnectionRequestResponse ConnectionRequestAccepted)]
 
@@ -291,8 +298,14 @@ testEarlyCloseSocket = do
       -- Listen for incoming messages
       (clientPort, _) <- forkServer "127.0.0.1" "0" 5 True throwIO throwIO $ \socketFree (sock, _) -> do
         -- Initial setup
-        0 <- recvWord32 sock
-        0 <- recvWord32 sock
+        -- Protocol version 0.
+        _ <- recvWord32 sock
+        -- Length of handshake.
+        _ <- recvWord32 sock
+        -- The EndPointId they want.
+        _ <- recvWord32 sock
+        -- 0 means addressable.
+        _ <- recvWord32 sock
         _ <- recvWithLength maxBound sock
         sendMany sock [encodeWord32 (encodeConnectionRequestResponse ConnectionRequestAccepted)]
 
@@ -652,6 +665,8 @@ testReconnect = do
   (serverPort, _) <- forkServer "127.0.0.1" "0" 5 True throwIO throwIO $ \socketFree (sock, _) -> do
     -- Accept the connection
     Right 0  <- tryIO $ recvWord32 sock
+    Right _  <- tryIO $ recvWord32 sock
+    Right 0  <- tryIO $ recvWord32 sock
     Right 0  <- tryIO $ recvWord32 sock
     Right _  <- tryIO $ recvWithLength maxBound sock
 
@@ -778,6 +793,8 @@ testUnidirectionalError = do
     -- fail, but we don't want to close that socket at that point (which
     -- would shutdown the socket in the other direction)
     void . (try :: IO () -> IO (Either SomeException ())) $ do
+      0 <- recvWord32 sock
+      _ <- recvWord32 sock
       0 <- recvWord32 sock
       0 <- recvWord32 sock
       _ <- recvWithLength maxBound sock
@@ -987,7 +1004,7 @@ testCloseEndPoint = do
     putMVar serverAddress (address ep)
     ConnectionOpened _ _ _ <- receive ep
     Just () <- timeout 5000000 (closeEndPoint ep)
-    putMVar serverFinished ()
+    putMVar serverFinished x
     return ()
 
   -- A nefarious client which connects to the server then stops responding.
@@ -997,7 +1014,13 @@ testCloseEndPoint = do
     sock <- N.socket (N.addrFamily addr) N.Stream N.defaultProtocol
     N.connect sock (N.addrAddress addr)
     sendMany sock [
-        encodeWord32 endPointId
+        -- First send the version and length of the handshake.
+        -- 4 bytes for the endpoint id, 13 for the address.
+        encodeWord32 0x00000000
+      , encodeWord32 17
+        -- Version 0x00000000 handshake data.
+      , encodeWord32 endPointId
+        -- 0 means we're addressable.
       , encodeWord32 0
       , encodeWord32 13
       , "127.0.0.1:0:0"
@@ -1089,7 +1112,7 @@ main = do
            , ("BlockAfterCloseSocket",  testBlockAfterCloseSocket)
            , ("UnnecessaryConnect",     testUnnecessaryConnect 10)
            , ("InvalidAddress",         testInvalidAddress)
-           , ("InvalidConnect",         testInvalidConnect)
+           , ( "InvalidConnect",         testInvalidConnect)
            , ("Many",                   testMany)
            , ("BreakTransport",         testBreakTransport)
            , ("Reconnect",              testReconnect)
