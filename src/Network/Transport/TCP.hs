@@ -549,11 +549,15 @@ data TCPParameters = TCPParameters {
 -- | Internal functionality we expose for unit testing
 data TransportInternals = TransportInternals
   { -- | The ID of the thread that listens for new incoming connections
-    transportThread :: Maybe ThreadId
+    transportThread     :: Maybe ThreadId
+    -- | A variant of newEndPoint in which the QDisc determined by the
+    -- transport's TCPParameters can be optionally overridden.
+  , newEndPointInternal :: (forall t . Maybe (QDisc t))
+                        -> IO (Either (TransportError NewEndPointErrorCode) EndPoint)
     -- | Find the socket between a local and a remote endpoint
-  , socketBetween :: EndPointAddress
-                  -> EndPointAddress
-                  -> IO N.Socket
+  , socketBetween       :: EndPointAddress
+                        -> EndPointAddress
+                        -> IO N.Socket
   }
 
 --------------------------------------------------------------------------------
@@ -633,8 +637,13 @@ createTransportExposeInternals addr params = do
                                in apiCloseTransport transport mtid evs
             }
         , TransportInternals
-            { transportThread = mtid
-            , socketBetween   = internalSocketBetween transport
+            { transportThread     = mtid
+            , socketBetween       = internalSocketBetween transport
+            , newEndPointInternal = \mqdisc -> case mqdisc of
+                Just qdisc -> apiNewEndPoint transport qdisc
+                Nothing -> do
+                  qdisc <- tcpNewQDisc params
+                  apiNewEndPoint transport qdisc
             }
         )
 
