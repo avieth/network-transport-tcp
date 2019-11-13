@@ -46,6 +46,7 @@ import qualified Network.Socket as N
   , Socket
   , SocketType(Stream)
   , SocketOption(ReuseAddr)
+  , AddrInfo(..)
   , getAddrInfo
   , defaultHints
   , socket
@@ -212,8 +213,7 @@ randomEndPointAddress = do
 -- The return value includes the port was bound to. This is not always the same
 -- port as that given in the argument. For example, binding to port 0 actually
 -- binds to a random port, selected by the OS.
-forkServer :: N.HostName                     -- ^ Host
-           -> N.ServiceName                  -- ^ Port
+forkServer :: N.AddrInfo                     -- ^ Where to bind?
            -> Int                            -- ^ Backlog (maximum number of queued connections)
            -> Bool                           -- ^ Set ReuseAddr option?
            -> (SomeException -> IO ())       -- ^ Error handler. Called with an
@@ -227,11 +227,7 @@ forkServer :: N.HostName                     -- ^ Host
                                              --   action which completes when
                                              --   the socket is closed.
            -> IO (N.ServiceName, ThreadId)
-forkServer host port backlog reuseAddr errorHandler terminationHandler requestHandler = do
-    -- Resolve the specified address. By specification, getAddrInfo will never
-    -- return an empty list (but will throw an exception instead) and will return
-    -- the "best" address first, whatever that means
-    addr:_ <- N.getAddrInfo (Just N.defaultHints) (Just host) (Just port)
+forkServer addr backlog reuseAddr errorHandler terminationHandler requestHandler = do
     bracketOnError (N.socket (N.addrFamily addr) N.Stream N.defaultProtocol)
                    tryCloseSocket $ \sock -> do
       when reuseAddr $ N.setSocketOption sock N.ReuseAddr 1

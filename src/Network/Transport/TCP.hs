@@ -87,6 +87,8 @@ import qualified Network.Socket as N
   ( HostName
   , ServiceName
   , Socket
+  , bind
+  , defaultHints
   , getAddrInfo
   , socket
   , addrFamily
@@ -289,8 +291,10 @@ import qualified System.Timeout (timeout)
 data TransportAddrInfo = TransportAddrInfo
   { transportHost     :: !N.HostName
   , transportPort     :: !N.ServiceName
+  -- TBD these 2 needed?
   , transportBindHost :: !N.HostName
   , transportBindPort :: !N.ServiceName
+  , transportBindAddr :: !N.SockAddr
   }
 
 data TCPTransport = TCPTransport
@@ -607,19 +611,20 @@ createTransportExposeInternals addr params = do
         -- completes (see description of 'forkServer'), yet we need the port to
         -- construct a transport. So we tie a recursive knot.
         (port', result) <- do
+          addr:_ <- N.getAddrInfo (Just N.defaultHints) (Just bindHost) (Just bindPort)
           let (externalHost, externalPort) = mkExternal port'
           let addrInfo = TransportAddrInfo { transportHost     = externalHost
                                            , transportPort     = externalPort
                                            , transportBindHost = bindHost
                                            , transportBindPort = port'
+                                           , transportBindAddr = N.addrAddress addr
                                            }
           let transport = TCPTransport { transportState    = state
                                        , transportAddrInfo = Just addrInfo
                                        , transportParams   = params
                                        }
           bracketOnError (forkServer
-                              bindHost
-                              bindPort
+                              addr
                               (tcpBacklog params)
                               (tcpReuseServerAddr params)
                               (errorHandler transport)
@@ -1559,8 +1564,10 @@ setupRemoteEndPoint
   -> Maybe Int
   -> IO (Maybe ConnectionRequestResponse)
 setupRemoteEndPoint transport (ourEndPoint, theirEndPoint) connTimeout = do
-    let mOurAddress = const ourAddress <$> transportAddrInfo transport
-    result <- socketToEndPoint mOurAddress
+    let mBindAddr   = transportBindAddr <$> transportAddrInfo transport
+        mOurAddress = const ourAddress  <$> transportAddrInfo transport
+    result <- socketToEndPoint mBindAddr
+                               mOurAddress
                                theirAddress
                                (tcpReuseClientAddr params)
                                (tcpNoDelay params)
@@ -2026,7 +2033,8 @@ withScheduledAction ourEndPoint f =
 -- responsible for eventually closing the socket and filling the MVar (which
 -- is empty). The MVar must be filled immediately after, and never before,
 -- the socket is closed.
-socketToEndPoint :: Maybe EndPointAddress -- ^ Our address
+socketToEndPoint :: Maybe N.SockAddr      -- ^ Where to bind the socket
+                 -> Maybe EndPointAddress -- ^ Our address
                  -> EndPointAddress       -- ^ Their address
                  -> Bool                  -- ^ Use SO_REUSEADDR?
                  -> Bool                  -- ^ Use TCP_NODELAY
@@ -2035,7 +2043,7 @@ socketToEndPoint :: Maybe EndPointAddress -- ^ Our address
                  -> Maybe Int             -- ^ Timeout for connect
                  -> IO (Either (TransportError ConnectErrorCode)
                                (MVar (), N.Socket, ConnectionRequestResponse))
-socketToEndPoint mOurAddress theirAddress reuseAddr noDelay keepAlive
+socketToEndPoint mBindAddr mOurAddress theirAddress reuseAddr noDelay keepAlive
                  mUserTimeout timeout =
   try $ do
     (host, port, theirEndPointId) <- case decodeEndPointAddress theirAddress of
@@ -2043,7 +2051,7 @@ socketToEndPoint mOurAddress theirAddress reuseAddr noDelay keepAlive
       Just dec -> return dec
     addr:_ <- mapIOException invalidAddress $
       N.getAddrInfo Nothing (Just host) (Just port)
-    bracketOnError (createSocket addr) tryCloseSocket $ \sock -> do
+    bracketOnError (createSocket mBindAddr addr) tryCloseSocket $ \sock -> do
       when reuseAddr $
         mapIOException failed $ N.setSocketOption sock N.ReuseAddr 1
       when noDelay $
@@ -2072,9 +2080,11 @@ socketToEndPoint mOurAddress theirAddress reuseAddr noDelay keepAlive
           socketClosedVar <- newEmptyMVar
           return (socketClosedVar, sock, r)
   where
-    createSocket :: N.AddrInfo -> IO N.Socket
-    createSocket addr = mapIOException insufficientResources $
-      N.socket (N.addrFamily addr) N.Stream N.defaultProtocol
+    createSocket :: Maybe N.SockAddr -> N.AddrInfo -> IO N.Socket
+    createSocket mBindAddr addr = mapIOException insufficientResources $ do
+      sock <- N.socket (N.addrFamily addr) N.Stream N.defaultProtocol
+      forM_ mBindAddr (N.bind sock)
+      pure sock
 
     invalidAddress        = TransportError ConnectNotFound . show
     insufficientResources = TransportError ConnectInsufficientResources . show
