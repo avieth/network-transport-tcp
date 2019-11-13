@@ -291,9 +291,6 @@ import qualified System.Timeout (timeout)
 data TransportAddrInfo = TransportAddrInfo
   { transportHost     :: !N.HostName
   , transportPort     :: !N.ServiceName
-  -- TBD these 2 needed?
-  , transportBindHost :: !N.HostName
-  , transportBindPort :: !N.ServiceName
   , transportBindAddr :: !N.SockAddr
   }
 
@@ -611,12 +608,10 @@ createTransportExposeInternals addr params = do
         -- completes (see description of 'forkServer'), yet we need the port to
         -- construct a transport. So we tie a recursive knot.
         (port', result) <- do
-          addr:_ <- N.getAddrInfo (Just N.defaultHints) (Just bindHost) (Just bindPort)
+          addr:_ <- N.getAddrInfo (Just N.defaultHints) (Just bindHost) Nothing
           let (externalHost, externalPort) = mkExternal port'
           let addrInfo = TransportAddrInfo { transportHost     = externalHost
                                            , transportPort     = externalPort
-                                           , transportBindHost = bindHost
-                                           , transportBindPort = port'
                                            , transportBindAddr = N.addrAddress addr
                                            }
           let transport = TCPTransport { transportState    = state
