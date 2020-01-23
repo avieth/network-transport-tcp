@@ -62,7 +62,9 @@ import Network.Transport.TCP.Internal
   , encodeWord32
   , tryCloseSocket
   , tryShutdownSocketBoth
-  , resolveSockAddr
+  , sockAddrHost
+  , resolveEndPointAddressHost
+  , hostAddressString
   , EndPointId
   , encodeEndPointAddress
   , decodeEndPointAddress
@@ -99,7 +101,7 @@ import qualified Network.Socket as N
   , SocketOption(ReuseAddr, NoDelay, UserTimeout, KeepAlive)
   , isSupportedSocketOption
   , connect
-  , sOMAXCONN
+  , maxListenQueue
   , AddrInfo
   , SockAddr(..)
   )
@@ -671,7 +673,7 @@ createTransportExposeInternals addr params = do
 -- | Default TCP parameters
 defaultTCPParameters :: TCPParameters
 defaultTCPParameters = TCPParameters {
-    tcpBacklog         = N.sOMAXCONN
+    tcpBacklog         = N.maxListenQueue
   , tcpReuseServerAddr = True
   , tcpReuseClientAddr = True
   , tcpNoDelay         = False
@@ -1024,13 +1026,13 @@ handleConnectionRequest transport errorHandler socketClosed (sock, sockAddr) = h
 
     handleConnectionRequestV0 :: (N.Socket, N.SockAddr) -> IO (Maybe (IO ()))
     handleConnectionRequestV0 (sock, sockAddr) = do
-      -- Get the OS-determined host and port.
-      (numericHost, resolvedHost, actualPort) <-
-        resolveSockAddr sockAddr >>=
-          maybe (throwIO (userError "handleConnectionRequest: invalid socket address")) return
+      -- Get the OS-determined numeric host address.
+      actualHostAddress <- case sockAddrHost sockAddr of
+        Just it -> pure it
+        Nothing -> throwIO (userError "handleConnectionRequest: invalid socket address")
       -- The peer must send our identifier and their address promptly, if a
       -- timeout is set.
-      (ourEndPointId, theirAddress, mTheirHost) <- do
+      (ourEndPointId, theirEndPointAddress, mClaimedHostAddress) <- do
         ourEndPointId <- recvWord32 sock
         let maxAddressLength = tcpMaxAddressLength $ transportParams transport
         mTheirAddress <- BS.concat <$> recvWithLength maxAddressLength sock
@@ -1040,26 +1042,33 @@ handleConnectionRequest transport errorHandler socketClosed (sock, sockAddr) = h
           theirAddress <- randomEndPointAddress
           return (ourEndPointId, theirAddress, Nothing)
         else do
-          let theirAddress = EndPointAddress mTheirAddress
+          let theirEndPointAddress = EndPointAddress mTheirAddress
           (theirHost, _, _)
             <- maybe (throwIO (userError "handleConnectionRequest: peer gave malformed address"))
                      return
-                     (decodeEndPointAddress theirAddress)
-          return (ourEndPointId, theirAddress, Just theirHost)
+                     (decodeEndPointAddress theirEndPointAddress)
+          -- theirHost could be a name or a numeric address (it's a string).
+          claimedHostAddress <- resolveEndPointAddressHost theirHost >>=
+            maybe (throwIO (userError "handleConnectionRequest: invalid peer host")) return
+          return (ourEndPointId, theirEndPointAddress, Just claimedHostAddress)
       let checkPeerHost = tcpCheckPeerHost (transportParams transport)
-      continue <- case (mTheirHost, checkPeerHost) of
-        (Just theirHost, True) -> do
+      -- mClaimedHostAddress is only Nothing if they are an unaddressable
+      -- peer (we generated a UUID to identify them).
+      continue <- case (mClaimedHostAddress, checkPeerHost) of
+        (Just claimedHostAddress, True) -> do
           -- If the OS-determined host doesn't match the host that the peer gave us,
           -- then we have no choice but to reject the connection. It's because we
           -- use the EndPointAddress to key the remote end points (localConnections)
           -- and we don't want to allow a peer to deny service to other peers by
           -- claiming to have their host and port.
-          if theirHost == numericHost || theirHost == resolvedHost
+          if claimedHostAddress == actualHostAddress
           then return True
           else do
             sendMany sock $
                 encodeWord32 (encodeConnectionRequestResponse ConnectionRequestHostMismatch)
-              : (prependLength [BSC.pack theirHost] ++ prependLength [BSC.pack numericHost] ++ prependLength [BSC.pack resolvedHost])
+              : (  prependLength [BSC.pack (hostAddressString claimedHostAddress)]
+                ++ prependLength [BSC.pack (hostAddressString actualHostAddress )]
+                )
             return False
         _ -> return True
       if continue
@@ -1074,7 +1083,7 @@ handleConnectionRequest transport errorHandler socketClosed (sock, sockAddr) = h
                 return ourEndPoint
           TransportClosed ->
             throwIO $ userError "Transport closed"
-        return (Just (go ourEndPoint theirAddress))
+        return (Just (go ourEndPoint theirEndPointAddress))
       else return Nothing
 
       where
@@ -1631,8 +1640,6 @@ setupRemoteEndPoint transport (ourEndPoint, theirEndPoint) connTimeout = do
                 , BSC.unpack (BS.concat claimedHost)
                 , "; Numeric: "
                 , BSC.unpack (BS.concat actualNumericHost)
-                , "; Resolved: "
-                , BSC.unpack (BS.concat actualResolvedHost)
                 ]
           return (TransportError ConnectFailed reason)
         resolveInit (ourEndPoint, theirEndPoint) (RemoteEndPointInvalid err)

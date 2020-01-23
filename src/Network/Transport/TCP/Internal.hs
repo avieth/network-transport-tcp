@@ -13,7 +13,9 @@ module Network.Transport.TCP.Internal
   , encodeWord32
   , tryCloseSocket
   , tryShutdownSocketBoth
-  , resolveSockAddr
+  , sockAddrHost
+  , resolveEndPointAddressHost
+  , hostAddressString
   , EndPointId
   , encodeEndPointAddress
   , decodeEndPointAddress
@@ -41,7 +43,9 @@ import qualified Network.Transport.TCP.Mock.Socket as N
 #else
 import qualified Network.Socket as N
 #endif
-  ( HostName
+  ( HostAddress
+  , HostName
+  , NameInfoFlag(NI_NUMERICHOST)
   , ServiceName
   , Socket
   , SocketType(Stream)
@@ -50,19 +54,18 @@ import qualified Network.Socket as N
   , getAddrInfo
   , defaultHints
   , socket
-  , bindSocket
+  , bind
   , listen
   , addrFamily
   , addrAddress
   , defaultProtocol
   , setSocketOption
   , accept
-  , sClose
+  , close
   , socketPort
   , shutdown
   , ShutdownCmd(ShutdownBoth)
   , SockAddr(..)
-  , inet_ntoa
   , getNameInfo
   )
 
@@ -106,6 +109,8 @@ import Data.ByteString.Lazy.Builder (word64BE, toLazyByteString)
 import Data.Monoid ((<>))
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
+
+import System.IO.Unsafe (unsafePerformIO)
 
 -- | Local identifier for an endpoint within this transport
 type EndPointId = Word32
@@ -231,13 +236,13 @@ forkServer addr backlog reuseAddr errorHandler terminationHandler requestHandler
     bracketOnError (N.socket (N.addrFamily addr) N.Stream N.defaultProtocol)
                    tryCloseSocket $ \sock -> do
       when reuseAddr $ N.setSocketOption sock N.ReuseAddr 1
-      N.bindSocket sock (N.addrAddress addr)
+      N.bind sock (N.addrAddress addr)
       N.listen sock backlog
 
       -- Close up and fill the synchonizing MVar.
       let release :: ((N.Socket, N.SockAddr), MVar ()) -> IO ()
           release ((sock, _), socketClosed) =
-            N.sClose sock `finally` putMVar socketClosed ()
+            N.close sock `finally` putMVar socketClosed ()
 
       -- Run the request handler.
       let act restore (sock, sockAddr) = do
@@ -259,7 +264,7 @@ forkServer addr backlog reuseAddr errorHandler terminationHandler requestHandler
             -- Looks like 'act' will never throw an exception, but to be
             -- safe we'll close the socket if it does.
             let handler :: SomeException -> IO ()
-                handler _ = N.sClose sock
+                handler _ = N.close sock
             catch (act restore (sock, sockAddr)) handler
 
       -- We start listening for incoming requests in a separate thread. When
@@ -292,7 +297,7 @@ recvWord32 = fmap (decodeWord32 . BS.concat) . flip recvExact 4
 -- | Close a socket, ignoring I/O exceptions.
 tryCloseSocket :: N.Socket -> IO ()
 tryCloseSocket sock = void . tryIO $
-  N.sClose sock
+  N.close sock
 
 -- | Shutdown socket sends and receives, ignoring I/O exceptions.
 tryShutdownSocketBoth :: N.Socket -> IO ()
@@ -316,27 +321,38 @@ recvExact sock len = go [] len
         then throwIO (userError "recvExact: Socket closed")
         else go (bs : acc) (l - fromIntegral (BS.length bs))
 
+-- | Gets a string representation of a host address, the same way the
+-- network library does it (but does not export). See the Show instance for
+-- SockAddr.
+hostAddressString :: N.HostAddress -> String
+hostAddressString addr = unsafePerformIO $
+  -- Use 0 for the port because it doesn't matter (lookup service name is set
+  -- to False).
+  fst <$> N.getNameInfo [N.NI_NUMERICHOST] True False (N.SockAddrInet 0 addr) >>=
+  maybe (fail "hostAddressString: impossible internal error") return
+
 -- | Get the numeric host, resolved host (via getNameInfo), and port from a
--- SockAddr. The numeric host is first, then resolved host (which may be the
--- same as the numeric host).
+-- SockAddr.
 -- Will only give 'Just' for IPv4 addresses.
-resolveSockAddr :: N.SockAddr -> IO (Maybe (N.HostName, N.HostName, N.ServiceName))
-resolveSockAddr sockAddr = case sockAddr of
-  N.SockAddrInet port host -> do
-    (mResolvedHost, mResolvedPort) <- N.getNameInfo [] True False sockAddr
-    case (mResolvedHost, mResolvedPort) of
-      (Just resolvedHost, Nothing) -> do
-        numericHost <- N.inet_ntoa host
-        return $ Just (numericHost, resolvedHost, show port)
-      _ -> error $ concat [
-          "decodeSockAddr: unexpected resolution "
-        , show sockAddr
-        , " -> "
-        , show mResolvedHost
-        , ", "
-        , show mResolvedPort
-        ]
-  _ -> return Nothing
+sockAddrHost :: N.SockAddr -> Maybe N.HostAddress
+sockAddrHost sockAddr = case sockAddr of
+  N.SockAddrInet _ host -> Just host
+  _ -> Nothing
+
+-- | For use in tandem with `sockAddrHost`: this one takes the first
+-- component of an `EndPointAddress` (see `decodeEndPointAddress`) and
+-- uses `getAddrInfo` to get a `HostAddress`. This will be compared to the
+-- `HostAddress` from `sockAddrHost` from the socket on which the
+-- decoded endpoint address was sent. They need to match, else the connection
+-- should be rejected (to avoid address hijacking).
+--
+-- `Nothing` is given unless the resolved address is IPv4.
+resolveEndPointAddressHost :: N.HostName -> IO (Maybe N.HostAddress)
+resolveEndPointAddressHost hostName = do
+  addrInfo : _ <- N.getAddrInfo Nothing (Just hostName) Nothing
+  case N.addrAddress addrInfo of
+    N.SockAddrInet _ hostAddress -> pure $ Just hostAddress
+    _ -> pure Nothing
 
 -- | Encode end point address
 encodeEndPointAddress :: N.HostName
