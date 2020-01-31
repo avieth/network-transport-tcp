@@ -43,12 +43,3 @@ Library
     CPP-Options:     -DUSE_MOCK_NETWORK
     Exposed-modules: Network.Transport.TCP.Mock.Socket
                      Network.Transport.TCP.Mock.Socket.ByteString
-
-Executable ConcTest
-  Build-Depends: base,
-                 network-transport,
-                 network-transport-tcp == 0.7.0,
-                 bytestring,
-                 async
-  Main-Is: ConcTest.hs
-  ghc-options: -Wall -threaded -O2
